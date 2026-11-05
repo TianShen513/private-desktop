@@ -11,13 +11,20 @@ from . import __version__
 from .sandbox import Sandbox, SandboxError
 
 MESSAGES = {
-    "docker_not_installed": "Install Docker Desktop and start it, then retry.",
-    "process_failed": "Docker could not complete the operation. Check Docker Desktop is running.",
+    "docker_not_installed": "Install Docker (Docker Desktop on macOS/Windows, Docker Engine on Linux) and start it, then retry.",
+    "process_failed": "Docker could not complete the operation. Check the Docker engine is running.",
     "process_unavailable": "Docker could not be started. Check your installation.",
-    "process_timeout": "Docker timed out. Check Docker Desktop and retry.",
+    "process_timeout": "Docker timed out. Check the Docker engine and retry.",
     "output_limit": "A backend response exceeded the permitted size.",
     "linux_containers_required": "Switch Docker Desktop to Linux containers.",
-    "remote_docker_not_allowed": "Select a local Docker Desktop context; remote Docker is disabled.",
+    "remote_docker_not_allowed": "Select a local Docker context; remote Docker is disabled.",
+    "docker_not_running": ("The Docker engine is not running. Start Docker Desktop, or on Linux run "
+                           "'systemctl --user start docker' (rootless) or 'sudo systemctl start docker'."),
+    "docker_permission_denied": ("This user cannot open the Docker socket. On Linux, use rootless Docker "
+                                 "or join the docker group, then log in again. See README, Linux hosts."),
+    "resource_limits_unavailable": ("Docker cannot enforce CPU, memory, and process limits here. For rootless "
+                                    "Docker, delegate cgroup v2 controllers. See README, Linux hosts."),
+    "podman_not_supported": "Podman is not supported yet. Install Docker Engine (rootless works).",
     "sandbox_not_running": "Run private-desktop build, then private-desktop start.",
     "start_failed_build_image_first": "Run private-desktop build before starting the desktop.",
     "desktop_start_timeout": "The desktop did not become ready. Stop it and rebuild the image.",

@@ -1,12 +1,18 @@
 import copy
+import io
 import json
 import os
 from pathlib import Path
+import socket
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from private_desktop.sandbox import APP, LABEL, TMPFS, Sandbox, SandboxError, owner_id
+from private_desktop import sandbox as sandbox_module
+from private_desktop.sandbox import ASSETS, APP, LABEL, TMPFS, Sandbox, SandboxError, owner_id
+
+LOCAL_ENGINE = {"DOCKER_HOST": "npipe:////./pipe/docker_engine", "DOCKER_CONTEXT": ""}
 
 
 def safe_inspection(owner):
@@ -121,6 +127,88 @@ class SandboxTests(unittest.TestCase):
                 self.sandbox.run(["status"])
             self.assertNotIn("RAW_PRIVATE_CONTENT", str(raised.exception))
 
+
+    def test_launch_requests_private_ipc(self):
+        args = self.sandbox.start_arguments()
+        self.assertEqual(args[args.index("--ipc") + 1], "private")
+
+    def assert_engine_error(self, code):
+        with self.assertRaises(SandboxError) as raised:
+            self.sandbox.check_engine()
+        self.assertEqual(str(raised.exception), code)
+
+    @unittest.skipIf(os.name == "nt", "Unix sockets are not used for Docker on Windows")
+    def test_missing_engine_socket_reports_stopped_engine(self):
+        missing = Path(self.temporary.name, "missing.sock")
+        with patch.dict(os.environ, {"DOCKER_HOST": f"unix://{missing}", "DOCKER_CONTEXT": ""}), \
+                patch.object(self.sandbox, "docker_capture") as call:
+            self.assert_engine_error("docker_not_running")
+            call.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "Unix sockets are not used for Docker on Windows")
+    def test_inaccessible_engine_socket_reports_permission(self):
+        path = Path(self.temporary.name, "d.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(path))
+        with patch.dict(os.environ, {"DOCKER_HOST": f"unix://{path}", "DOCKER_CONTEXT": ""}), \
+                patch.object(sandbox_module.os, "access", return_value=False), \
+                patch.object(self.sandbox, "docker_capture") as call:
+            self.assert_engine_error("docker_permission_denied")
+            call.assert_not_called()
+
+    def test_engine_without_resource_limits_is_rejected(self):
+        for info in (b"linux true true false\n", b"linux false true true\n", b"linux true\n"):
+            with self.subTest(info=info), patch.dict(os.environ, LOCAL_ENGINE), \
+                    patch.object(self.sandbox, "docker_capture", return_value=info):
+                self.assert_engine_error("resource_limits_unavailable")
+
+    def test_engine_info_checks_os_then_limits(self):
+        with patch.dict(os.environ, LOCAL_ENGINE):
+            with patch.object(self.sandbox, "docker_capture", return_value=b"windows true true true\n"):
+                self.assert_engine_error("linux_containers_required")
+            with patch.object(self.sandbox, "docker_capture", return_value=b"linux true true true\n"):
+                self.sandbox.check_engine()
+
+    def test_podman_docker_shim_is_named(self):
+        def fake(args, **_):
+            if args[0] == "--version":
+                return b"podman version 5.6.0\n"
+            raise SandboxError("process_failed")
+        with patch.dict(os.environ, {"DOCKER_HOST": "", "DOCKER_CONTEXT": ""}), \
+                patch.object(self.sandbox, "docker_capture", side_effect=fake):
+            self.assert_engine_error("podman_not_supported")
+
+    def test_context_failure_without_podman_keeps_code(self):
+        def fake(args, **_):
+            if args[0] == "--version":
+                return b"Docker version 28.5.1, build e180ab8\n"
+            raise SandboxError("process_failed")
+        with patch.dict(os.environ, {"DOCKER_HOST": "", "DOCKER_CONTEXT": ""}), \
+                patch.object(self.sandbox, "docker_capture", side_effect=fake):
+            self.assert_engine_error("process_failed")
+
+    def test_build_streams_recipe_without_host_paths(self):
+        self.sandbox.docker = "docker"
+        with patch.object(self.sandbox, "check_engine"), \
+                patch.object(sandbox_module.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.sandbox.build()
+        argv = run.call_args.args[0]
+        self.assertEqual(argv, ["docker", "build", "--tag", sandbox_module.IMAGE, "-"])
+        with tarfile.open(fileobj=io.BytesIO(run.call_args.kwargs["input"])) as archive:
+            self.assertEqual(archive.getnames(), list(ASSETS))
+            dockerfile = archive.extractfile("Dockerfile").read()
+        self.assertIn(b"FROM ubuntu:24.04", dockerfile)
+
+    def test_failed_build_is_reported(self):
+        self.sandbox.docker = "docker"
+        with patch.object(self.sandbox, "check_engine"), \
+                patch.object(sandbox_module.subprocess, "run") as run:
+            run.return_value.returncode = 1
+            with self.assertRaises(SandboxError) as raised:
+                self.sandbox.build()
+        self.assertEqual(str(raised.exception), "image_build_failed")
 
 if __name__ == "__main__":
     unittest.main()

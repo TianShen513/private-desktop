@@ -12,4 +12,4 @@ Do not attach real desktop snapshots, screenshots, token mappings, personal data
 
 ## Supported versions
 
-Security fixes target the latest 0.1.x release. Update both the gateway and its locally built image when a security fix changes sandbox assets. Dependencies, Docker Desktop, and the host operating system need their own updates.
+Security fixes target the latest 0.1.x release. Update both the gateway and its locally built image when a security fix changes sandbox assets. Dependencies, Docker Desktop or Docker Engine, and the host operating system need their own updates.

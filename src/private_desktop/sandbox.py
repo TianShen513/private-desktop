@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import io
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import re
 import shutil
 import stat
 import subprocess
-import tempfile
+import tarfile
 import time
 import uuid
 
@@ -25,6 +26,8 @@ TMPFS = {
     "/home/desktop": "rw,nosuid,nodev,noexec,size=128m,uid=1000,gid=1000,mode=700",
 }
 ASSETS = ("Dockerfile", "entrypoint.sh", "demo.py", "checksums.txt", "AGENT_DESKTOP_LICENSE")
+# Go template field names from `docker info`: OS type, then cgroup support for each limit we set.
+ENGINE_INFO = "{{.OSType}} {{.MemoryLimit}} {{.PidsLimit}} {{.CPUCfsQuota}}"
 
 
 class SandboxError(Exception):
@@ -61,6 +64,34 @@ def owner_id(directory: Path) -> str:
     return value
 
 
+def check_socket(path: str) -> None:
+    """Distinguish a stopped daemon from a socket this user may not open (common on Linux)."""
+    try:
+        info = os.stat(path)
+    except PermissionError:
+        raise SandboxError("docker_permission_denied") from None
+    except OSError:
+        raise SandboxError("docker_not_running") from None
+    if not stat.S_ISSOCK(info.st_mode):
+        raise SandboxError("docker_not_running")
+    if not os.access(path, os.R_OK | os.W_OK):
+        raise SandboxError("docker_permission_denied")
+
+
+def build_context() -> bytes:
+    """The image recipe as an in-memory tar, so the engine never needs to read host paths."""
+    assets = importlib.resources.files("private_desktop").joinpath("assets")
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for name in ASSETS:
+            data = assets.joinpath(name).read_bytes()
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            entry.mode = 0o644
+            archive.addfile(entry, io.BytesIO(data))
+    return buffer.getvalue()
+
+
 class Sandbox:
     app = APP
 
@@ -78,18 +109,35 @@ class Sandbox:
         except ProcessError as exc:
             raise SandboxError(str(exc)) from None
 
+    def is_podman(self) -> bool:
+        try:
+            return b"podman" in self.docker_capture(["--version"]).lower()
+        except SandboxError:
+            return False
+
     def check_engine(self) -> None:
         # Docker's context setting takes precedence over DOCKER_HOST.
         endpoint = None if os.environ.get("DOCKER_CONTEXT") else os.environ.get("DOCKER_HOST")
         if not endpoint:
-            endpoint = self.docker_capture([
-                "context", "inspect", "--format", "{{.Endpoints.docker.Host}}",
-            ]).decode("utf-8").strip()
+            try:
+                endpoint = self.docker_capture([
+                    "context", "inspect", "--format", "{{.Endpoints.docker.Host}}",
+                ]).decode("utf-8").strip()
+            except SandboxError:
+                # podman-docker provides a `docker` command without contexts.
+                if self.is_podman():
+                    raise SandboxError("podman_not_supported") from None
+                raise
         if not endpoint.startswith(("unix://", "npipe://")):
             raise SandboxError("remote_docker_not_allowed")
-        kind = self.docker_capture(["info", "--format", "{{.OSType}}"], timeout=15)
-        if kind.strip() != b"linux":
+        if endpoint.startswith("unix://") and os.name != "nt":
+            check_socket(endpoint[len("unix://"):])
+        fields = self.docker_capture(["info", "--format", ENGINE_INFO], timeout=15).split()
+        if not fields or fields[0] != b"linux":
             raise SandboxError("linux_containers_required")
+        # Rootless Linux engines may lack delegated cgroup controllers; never run unlimited.
+        if fields[1:] != [b"true"] * 3:
+            raise SandboxError("resource_limits_unavailable")
 
     def inspect(self) -> dict:
         try:
@@ -145,6 +193,8 @@ class Sandbox:
             "--pull", "never", "--network", "none", "--read-only", "--user", "1000:1000",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
             "--pids-limit", "256", "--memory", "1g", "--cpus", "2", "--shm-size", "64m",
+            # Linux daemons can default to shareable IPC; request private explicitly.
+            "--ipc", "private",
             "--log-driver", "none", "--restart", "no",
         ]
         for destination, options in TMPFS.items():
@@ -216,12 +266,10 @@ class Sandbox:
     def build(self) -> None:
         self.check_engine()
         assert self.docker is not None
-        assets = importlib.resources.files("private_desktop").joinpath("assets")
-        with tempfile.TemporaryDirectory(prefix="private-desktop-build-") as temporary:
-            for name in ASSETS:
-                Path(temporary, name).write_bytes(assets.joinpath(name).read_bytes())
-            result = subprocess.run(
-                [self.docker, "build", "--tag", IMAGE, temporary], check=False,
-            )
-            if result.returncode:
-                raise SandboxError("image_build_failed")
+        # Stream the context on stdin. Confined Linux engines (such as the Docker snap)
+        # have a private /tmp and cannot read a temporary directory on the host.
+        result = subprocess.run(
+            [self.docker, "build", "--tag", IMAGE, "-"], input=build_context(), check=False,
+        )
+        if result.returncode:
+            raise SandboxError("image_build_failed")

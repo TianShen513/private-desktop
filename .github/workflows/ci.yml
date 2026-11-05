@@ -34,7 +34,7 @@ jobs:
         run: python dist/private-desktop.pyz --help
 
   desktop:
-    name: Real Linux desktop
+    name: Real Linux desktop (Docker Engine)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -44,6 +44,53 @@ jobs:
           python-version: "3.12"
       - name: Install package
         run: python -m pip install --no-deps .
+      - name: Build pinned desktop image
+        run: private-desktop build
+      - name: Exercise actual accessibility and privacy boundary
+        run: python tests/smoke_sandbox.py private-desktop:0.1.0
+
+  rootless:
+    name: Real Linux desktop (rootless Docker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Replace the system daemon with rootless Docker
+        # Mirrors the README's Linux setup: no docker group, delegated cgroup v2 limits.
+        run: |
+          sudo systemctl disable --now docker.service docker.socket
+          sudo rm -f /var/run/docker.sock
+          sudo apt-get install -y --no-install-recommends uidmap dbus-user-session
+          grep -q "^$USER:" /etc/subuid || echo "$USER:100000:65536" | sudo tee -a /etc/subuid
+          grep -q "^$USER:" /etc/subgid || echo "$USER:100000:65536" | sudo tee -a /etc/subgid
+          # Ubuntu 24.04 limits unprivileged user namespaces through AppArmor.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=cpu cpuset io memory pids\n' \
+            | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+          sudo systemctl daemon-reload
+          sudo loginctl enable-linger "$USER"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for _ in $(seq 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          curl -fsSL https://get.docker.com/rootless | FORCE_ROOTLESS_INSTALL=1 SKIP_IPTABLES=1 sh
+          {
+            echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+            echo "DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - name: Confirm the engine is rootless and limited
+        run: |
+          docker info --format '{{json .SecurityOptions}} {{.CgroupVersion}}' | tee /dev/stderr | grep -q rootless
+          test ! -w /var/run/docker.sock
+      - name: Install package
+        run: python -m pip install --no-deps .
+      - name: Doctor
+        run: private-desktop doctor
       - name: Build pinned desktop image
         run: private-desktop build
       - name: Exercise actual accessibility and privacy boundary
