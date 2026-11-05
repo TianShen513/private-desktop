@@ -4,11 +4,13 @@ Version 0.1 protects a narrow boundary: observations and actions between a cloud
 
 ## Trust boundaries
 
-Trusted components are the local Python gateway, its interpreter and source, the host operating system, Docker Desktop and its Linux VM, the built sandbox image, and the user controlling them. The model, proposed tool arguments, and app-supplied desktop text are untrusted.
+Trusted components are the local Python gateway, its interpreter and source, the host operating system, the container engine (Docker Desktop and its Linux VM, or Docker Engine on a Linux host), the built sandbox image, and the user controlling them. The model, proposed tool arguments, and app-supplied desktop text are untrusted.
 
 The model receives only the four gateway tools. It must have no alternative route to Docker, the raw CLI, host files, a shell, the guest network, or the local memory of the gateway. The gateway runs outside the container, so a desktop app cannot rewrite its policy. Docker administrative access can bypass every container boundary described here.
 
 On macOS and Windows, Docker Desktop provides a shared Linux VM. A container is isolated from the host and other containers using Docker's normal security mechanisms. There is not a dedicated hardware VM for each task. A Docker, kernel, hypervisor, or host compromise is outside this project's protection.
+
+On a Linux host with Docker Engine there is no VM layer. The container shares the host kernel and is isolated only by namespaces, cgroups, seccomp, dropped capabilities, and any AppArmor or SELinux policy, so a kernel or engine escape reaches the host directly. Rootless Docker narrows that outcome to the invoking user's account; with the system daemon it can be root. Membership in the `docker` group is Docker administrative access and is equivalent to root on that host.
 
 ## Data leaving the gateway
 
@@ -34,7 +36,7 @@ The launcher creates its own labeled container and checks ownership before opera
 - `--network none`, covering desktop apps as well as agent-desktop.
 - A non-root user, all Linux capabilities dropped, and `no-new-privileges`.
 - A read-only root filesystem with temporary writable desktop storage.
-- CPU, memory, and process-count limits.
+- Private IPC, CPU, memory, and process-count limits. The launcher refuses to start on an engine that reports it cannot enforce these limits, which can happen with rootless Linux engines that lack delegated cgroup controllers.
 - A pinned upstream agent-desktop release and pinned download checksums.
 
 The image build downloads packages and release artifacts. Build-time networking is separate from the offline runtime. Ubuntu repositories remain a supply-chain dependency; image tags and package repository contents are not an independent reproducible-build guarantee.
@@ -57,4 +59,4 @@ Confidential prose cannot remain completely hidden while a conventional cloud mo
 
 Unit tests should exercise nested and non-string secrets, unknown output fields, errors, oversized messages, unsupported tools, unknown arguments, stale and foreign references, and attempted token restoration. A real-container smoke test should exercise actual accessibility observations and actions, runtime hardening, and filtered results.
 
-Cross-platform Python tests do not establish that every Docker Desktop release behaves identically. A Linux Docker smoke test is useful runtime evidence, but macOS and Windows Docker Desktop should also be checked on supported host configurations. There has been no independent security audit.
+Cross-platform Python tests do not establish that every Docker Desktop or Docker Engine release behaves identically. Linux smoke tests against the system daemon and rootless Docker are useful runtime evidence, but macOS and Windows Docker Desktop should also be checked on supported host configurations. There has been no independent security audit.

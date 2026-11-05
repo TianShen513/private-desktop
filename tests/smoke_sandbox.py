@@ -71,6 +71,7 @@ def exercise(sandbox, directory: Path, root: Path) -> None:
     assert host["PidsLimit"] == 256
     assert host["Memory"] == 1024**3
     assert host["LogConfig"]["Type"] == "none"
+    assert host["IpcMode"] == "private"
     assert all("noexec" in options.split(",") for options in host["Tmpfs"].values())
 
     def agent(*args: str):
